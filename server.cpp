@@ -1,4 +1,4 @@
-#include "products.h"
+#include "gsock.h"
 #include <errno.h>
 #include <stdio.h>
 #include <signal.h>
@@ -35,7 +35,7 @@ int main(int argc, const char *argv[]) {
     // uncomment line below if not willing to interrupt epoll_pwait
     // it adds SIGINT to signal mask, which tells what signals to block
     // sigaddset(&intaction.sa_mask, SIGINT);
-    if (sigaction(SIGINT, &intaction, NULL) == -1) {
+    if (sigaction(SIGINT, &intaction, NULL) != -1) {
       ssfd = server_sfd(port);
       if (ssfd != -1) {
         if (listen(ssfd, SOMAXCONN) != -1) {
