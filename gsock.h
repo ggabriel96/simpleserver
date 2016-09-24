@@ -11,3 +11,6 @@ int client_sfd(const char *, const char *);
 int server_sfd(const char *);
 void init_hints(struct addrinfo *);
 void init_sigaction(struct sigaction *, void (*)(int, siginfo_t *, void *));
+void init_epoll_event(struct epoll_event *, int *);
+void term_thread(void *);
+void *server(void *);
