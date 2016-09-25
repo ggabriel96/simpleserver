@@ -63,11 +63,11 @@ int main(int argc, const char *argv[]) {
                 }
                 break;
               } else fprintf(stderr, "Received signal %u\n", siginfo.ssi_signo);
-            } else msg = (char *) "connection read sigfd";
+            } else msg = (char *) "main read sigfd";
           }
-        } else msg = (char *) "connection pthread_create";
-      } else msg = (char *) "connection signalfd";
-    } else msg = (char *) "connection pthread_sigmask";
+        } else msg = (char *) "main pthread_create";
+      } else msg = (char *) "main signalfd";
+    } else msg = (char *) "main pthread_sigmask";
   } else {
     fprintf(stderr, "Wrong arguments! The correct usage is: %s [port]. If no port is specified, it defaults to 1197\n", argv[0]);
     errno = EINVAL;
