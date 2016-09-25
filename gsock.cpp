@@ -41,136 +41,145 @@ int server_sfd(const char *port) {
 }
 
 int init_sfd(const char *host, const char *port, bool is_server) {
+  const int yes = 1, flags = is_server ? SOCK_NONBLOCK : 0;
   struct addrinfo hints, *rs = NULL, *r = NULL;
-  int sfd = -1, status = -1, yes = 1, flags = is_server ? SOCK_NONBLOCK : 0;
+  int sfd = -1;
   init_hints(&hints);
-  status = getaddrinfo(host, port, &hints, &rs);
-  if (status == 0) {
+  errno = getaddrinfo(host, port, &hints, &rs);
+  if (!errno) {
     for (r = rs; r != NULL; r = r->ai_next) {
       sfd = socket(r->ai_family, r->ai_socktype | flags, r->ai_protocol);
       if (sfd != -1) {
-        if ((is_server && bind(sfd, r->ai_addr, r->ai_addrlen) == 0) || (!is_server && connect(sfd, r->ai_addr, r->ai_addrlen) == 0))
-        break; // success
+        if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) == -1)
+          perror("init_sfd setsockopt SO_REUSEADDR");
+        // since Linux 3.9:
+        if (setsockopt(sfd, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof yes) == -1)
+          perror("init_sfd setsockopt SO_REUSEPORT");
+        if ((is_server && bind(sfd, r->ai_addr, r->ai_addrlen) == 0)
+            || (!is_server && connect(sfd, r->ai_addr, r->ai_addrlen) == 0))
+          break; // success
         close(sfd); sfd = -1;
-      } else fprintf (stderr, "socket: %s\n", gai_strerror(status));
+      } else perror("init_sfd socket");
     }
-    if (rs != NULL) freeaddrinfo(rs);
-    if (r == NULL) perror(is_server ? "bind" : "connect");
-    // lose the "Address already in use" error message
-    if (sfd != -1 && setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) == -1)
-    fprintf(stderr, "Could not setsockopt SO_REUSEADDR\n");
-  } else fprintf (stderr, "getaddrinfo: %s\n", gai_strerror(status));
+    if (rs != NULL) { freeaddrinfo(rs); rs = NULL; }
+    if (r == NULL) perror(is_server ? "init_sfd bind" : "init_sfd connect");
+    else r = NULL;
+  } else fprintf (stderr, "getaddrinfo: %s\n", gai_strerror(errno));
   return sfd;
 }
 
-void *server(void *sfd) {
+void *server(void *port) {
+  fdset_t sfd;
   sigset_t sigmask;
   bool done = false;
-  char buf[BUF_SIZE];
   ssize_t nread = -1;
-  int ssfd = *(int *) sfd;
+  char buf[GBUF_SIZE];
   struct sockaddr peer_addr;
-  struct signalfd_siginfo fdsi;
   pthread_t self = pthread_self();
-  int optval = -1; socklen_t optlen = 0;
-  struct epoll_event event, events[MAX_EVENTS];
+  struct signalfd_siginfo siginfo;
+  // signal and peer socket file descriptors
+  struct epoll_event event, events[GMAX_EVENTS];
   socklen_t peer_addr_len = sizeof (struct sockaddr);
-  // signal, epoll and peer socket file descriptors
-  int sigfd = -1, esfd = -1, psfd = -1, nevs = -1, n = -1;
+  int nevs = -1, n = -1, optval = -1; socklen_t optlen = 0;
   errno = EXIT_SUCCESS;
+  memset(&event, 0, sizeof (event));
+  memset(events, 0, sizeof (events));
   sigemptyset(&sigmask);
   sigaddset(&sigmask, SIGUSR1);
   errno = pthread_sigmask(SIG_BLOCK, &sigmask, NULL);
   if (!errno) {
-    if (listen(ssfd, SOMAXCONN) != -1) {
-      sigfd = signalfd(-1, &sigmask, SFD_NONBLOCK | SFD_CLOEXEC);
-      if (sigfd != -1) {
-        esfd = epoll_create1(0);
-        if (esfd != -1) {
-          event.data.fd = sigfd;
-          event.events = EPOLLET | EPOLLIN | EPOLLPRI;
-          if (epoll_ctl(esfd, EPOLL_CTL_ADD, sigfd, &event) != -1) {
-            event.data.fd = ssfd;
-            // edge triggered (level triggered is the default), watch for read operations
+    sfd.sign = signalfd(-1, &sigmask, SFD_NONBLOCK | SFD_CLOEXEC);
+    if (sfd.sign != -1) {
+      sfd.epoll = epoll_create1(0);
+      if (sfd.epoll != -1) {
+        sfd.servr = server_sfd((char *) port);
+        if (sfd.servr != -1) {
+          if (listen(sfd.servr, SOMAXCONN) != -1) {
+            event.data.fd = sfd.servr;
             event.events = EPOLLET | EPOLLIN;
-            if (epoll_ctl(esfd, EPOLL_CTL_ADD, ssfd, &event) != -1) {
-              while (errno == EXIT_SUCCESS && !done) {
-                nevs = epoll_pwait(esfd, events, MAX_EVENTS, MSTIMEOUT, NULL);
-                if (nevs != -1) {
-                  for (n = 0; n < nevs; n++) {
-                    if (events[n].events & EPOLLRDHUP) {
-                      printf("\nPeer socket %d on thread %lu has shut down\n", events[n].data.fd, self);
-                      close(events[n].data.fd); events[n].data.fd = -1;
-                      continue;
-                    }
-                    if (events[n].events & EPOLLHUP) {
-                      printf("\nPeer socket %d on thread %lu has closed the connection\n", events[n].data.fd, self);
-                      close(events[n].data.fd); events[n].data.fd = -1;
-                      continue;
-                    }
-                    if (events[n].events & EPOLLERR) {
-                      if (getsockopt(events[n].data.fd, SOL_SOCKET, SO_ERROR, &optval, &optlen) == 0)
-                        fprintf(stderr, "epoll_pwait error event: %s\n", strerror_r(optval, buf, BUF_SIZE));
-                      else fprintf(stderr, "epoll_pwait error event (could not getsockopt error information)\n");
-                      close(events[n].data.fd); events[n].data.fd = -1;
-                      continue;
-                    }
-                    if (events[n].data.fd == sigfd) {
-                      nread = read(events[n].data.fd, &fdsi, sizeof (struct signalfd_siginfo));
-                      if (nread == sizeof (struct signalfd_siginfo)) {
-                        if (fdsi.ssi_signo == SIGUSR1) {
-                          printf("Thread %lu received cancel request!\n", self);
-                          done = true; // quits while loop with !done condition
+            if (epoll_ctl(sfd.epoll, EPOLL_CTL_ADD, sfd.servr, &event) != -1) {
+              event.data.fd = sfd.sign;
+              event.events = EPOLLET | EPOLLIN | EPOLLPRI;
+              if (epoll_ctl(sfd.epoll, EPOLL_CTL_ADD, sfd.sign, &event) != -1) {
+                while (errno == EXIT_SUCCESS && !done) {
+                  // last argument is a sigmask while waiting for epoll_pwait
+                  nevs = epoll_pwait(sfd.epoll, events, GMAX_EVENTS, GMSTIMEOUT, NULL);
+                  if (nevs != -1) {
+                    for (n = 0; n < nevs; n++) {
+                      if (events[n].data.fd == sfd.sign) {
+                        nread = read(events[n].data.fd, &siginfo, sizeof (struct signalfd_siginfo));
+                        if (nread == sizeof (struct signalfd_siginfo)) {
+                          if (siginfo.ssi_signo == SIGUSR1) {
+                            printf("Thread %lu received cancel request!\n", self);
+                            done = true; // quits while loop with !done condition
+                            break;
+                          }
+                        } else {
+                          perror("data sfd.sign read"); // quits while loop with errno == EXIT_SUCCESS condition
                           break;
                         }
-                      } else {
-                        perror("sigfd recv"); // quits while loop with errno == EXIT_SUCCESS
-                        break;
                       }
-                    } else if (events[n].data.fd == ssfd) {
-                      printf("\nIncomming connection on thread %lu...\n", self);
-                      // SOCK_CLOEXEC sets it to automatically close the socket on exec()
-                      psfd = accept4(ssfd, &peer_addr, &peer_addr_len, SOCK_CLOEXEC | SOCK_NONBLOCK);
-                      if (psfd != -1) {
-                        printf("Accepted socket %d on thread %lu\n", psfd, self);
-                        event.data.fd = psfd;
-                        event.events = EPOLLET | EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
-                        if (epoll_ctl(esfd, EPOLL_CTL_ADD, psfd, &event) == -1)
-                          fprintf(stderr, "epoll_ctl error: %s\n", strerror_r(errno, buf, BUF_SIZE));
-                      } else perror("accept");
-                      errno = EXIT_SUCCESS;
-                    } else if (events[n].events & EPOLLIN) {
-                      FOREVER {
-                        memset(buf, 0, sizeof buf);
-                        nread = recv(events[n].data.fd, buf, BUF_SIZE, 0);
-                        if (nread == 0 || (nread == -1 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-                          if (nread == -1) perror("recv");
-                          printf("\nThread %lu closing socket %d...\n", self, events[n].data.fd);
-                          // Closing the descriptor will make epoll remove it
-                          // from the set of descriptors which are monitored.
-                          close(events[n].data.fd); events[n].data.fd = -1;
-                          break;
+                      if (events[n].events & EPOLLRDHUP) {
+                        printf("\nPeer socket %d on thread %lu has shut down\n", events[n].data.fd, self);
+                        close(events[n].data.fd); events[n].data.fd = -1;
+                        continue;
+                      }
+                      if (events[n].events & EPOLLHUP) {
+                        printf("\nPeer socket %d on thread %lu has closed the connection\n", events[n].data.fd, self);
+                        close(events[n].data.fd); events[n].data.fd = -1;
+                        continue;
+                      }
+                      if (events[n].events & EPOLLERR) {
+                        if (getsockopt(events[n].data.fd, SOL_SOCKET, SO_ERROR, &optval, &optlen) == 0)
+                          fprintf(stderr, "EPOLLERR event on thread %lu, index %d: %s\n", self, n, strerror_r(optval, buf, GBUF_SIZE));
+                        else fprintf(stderr, "EPOLLERR event on thread %lu, index %d (could not getsockopt error information)\n", self, n);
+                        close(events[n].data.fd); events[n].data.fd = -1;
+                        continue;
+                      }
+                      if (events[n].data.fd == sfd.servr) {
+                        printf("\nIncomming connection on thread %lu...\n", self);
+                        sfd.peer = accept4(sfd.servr, &peer_addr, &peer_addr_len, SOCK_NONBLOCK);
+                        if (sfd.peer != -1) {
+                          printf("Thread %lu accepted socket %d\n", self, sfd.peer);
+                          event.data.fd = sfd.peer;
+                          event.events = EPOLLET | EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLHUP | EPOLLERR;
+                          if (epoll_ctl(sfd.epoll, EPOLL_CTL_ADD, sfd.peer, &event) == -1)
+                            fprintf(stderr, "data epoll_ctl sfd.peer on thread %lu: %s\n", self, strerror_r(errno, buf, GBUF_SIZE));
+                        } else perror("server accept");
+                        errno = EXIT_SUCCESS;
+                      } else if (events[n].events & EPOLLIN) {
+                        FOREVER {
+                          memset(buf, 0, sizeof buf);
+                          nread = recv(events[n].data.fd, buf, GBUF_SIZE, 0);
+                          if (nread == 0 || (nread == -1 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                            if (nread == -1) perror("data recv");
+                            printf("\nThread %lu closing socket %d...\n", self, events[n].data.fd);
+                            // Closing the descriptor will make epoll remove it
+                            // from the set of descriptors which are monitored.
+                            close(events[n].data.fd); events[n].data.fd = -1;
+                            break;
+                          }
+                          else if (nread > 0) printf("Thread %lu received:\n'%s'\n\n", self, buf);
                         }
-                        else if (nread > 0) printf("Thread %lu received:\n'%s'\n\n", self, buf);
+                        errno = EXIT_SUCCESS;
+                      } else if (events[n].events & EPOLLOUT) {
+                        // ready to write on this socket
                       }
-                      errno = EXIT_SUCCESS;
                     }
-                  }
-                } else if (errno == EINTR) errno = EXIT_SUCCESS;
-                else perror("epoll_pwait");
-              }
-            } else perror("ssfd epoll_ctl");
-          } else perror("sigfd epoll_ctl");
-        } else perror("epoll_create1");
-      } else perror("signalfd");
-    } else perror("listen");
-  } // else perror("pthread_sigmask");
-  for (n = 0; n < MAX_EVENTS; n++) {
-    close(events[n].data.fd);
-    events[n].data.fd = -1;
-  }
-  // close(psfd); psfd = -1; // already closed on main loop or loop above
-  close(esfd); esfd = -1;
-  close(sigfd); sigfd = -1;
+                  } else if (errno == EINTR) errno = EXIT_SUCCESS;
+                  else perror("data epoll_pwait");
+                }
+              } else perror("data epoll_ctl sfd.sign");
+            } else perror("connection epoll_ctl sfd.servr");
+          } else perror("connection listen");
+        } else perror("connection server_sfd");
+      } else perror("connection epoll_create1");
+    } else perror("data signalfd");
+  } else perror("data pthread_sigmask");
+  for (n = 0; n < GMAX_EVENTS; n++)
+    if (events[n].data.fd > 2)
+      { close(events[n].data.fd); events[n].data.fd = -1; }
+  // already closed all other sockets on main loop or loop above
+  close(sfd.epoll); sfd.epoll = -1;
   pthread_exit(&errno);
 }
