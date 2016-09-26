@@ -1,19 +1,31 @@
 #include "gsock.h"
-#include <errno.h>
-#include <netdb.h>
 #include <stdio.h>
+#include <netdb.h>
+#include <errno.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
+#include <pthread.h>
+#include <sys/epoll.h>
+#include <sys/signalfd.h>
+using namespace std;
 
 int main(int argc, const char *argv[]) {
+  fdset_t sfd;
   FILE *f = NULL;
-  char buf[GBUF_SIZE];
-  int sfd = -1, len = -1, nsent = -1;
-  const char *port = NULL, *path = NULL, *msg = (char *) "Client execution terminated";
+  peer_data_t peer;
+  sigset_t sigmask;
+  ssize_t nread = 0;
+  char msg[GMSG_SIZE];
+  struct signalfd_siginfo siginfo;
+  bool done = false, connected = false;
+  const char *port = NULL, *path = NULL;
+  int send_servr_st = -1, recv_servr_st = -1;
+  struct epoll_event event, events[GMAX_PEER_EV];
+  int nevs = 0, n = 0, optval = 0; socklen_t optlen = 0;
   errno = EXIT_SUCCESS;
+  memset(msg, 0, sizeof (msg));
   if (argc == 3) {
     port = (char *) "1197";
     path = argv[2];
@@ -24,36 +36,132 @@ int main(int argc, const char *argv[]) {
   if (port != NULL && path != NULL) {
     f = fopen(path, "r");
     if (f != NULL) {
-      sfd = client_sfd(argv[1], port);
-      if (sfd != -1) {
-        while (fgets(buf, GBUF_SIZE, f) != NULL) {
-          len = strlen(buf); buf[--len] = '\0';
-          printf("Attempting to send '%s' (%d byte%s)...", buf, len, len == 1 ? "" : "s");
-          nsent = send(sfd, buf, len, 0);
-          if (nsent == -1) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-              printf("\nsend: %s. Trying again...\n", strerror_r(errno, buf, GBUF_SIZE));
-              fseek(f, -len - 1, SEEK_CUR);
-            } else {
-              fprintf(stderr, "\nsend: %s\n", strerror_r(errno, buf, GBUF_SIZE));
-              break;
-            }
-          } else { printf(" success!\n"); errno = EXIT_SUCCESS; }
-        }
-      } else msg = (char *) "Could not initialize socket";
+      sigemptyset(&sigmask);
+      sigaddset(&sigmask, SIGHUP); // Hangup detected on controlling terminal or death of controlling process
+      sigaddset(&sigmask, SIGINT); // Interrupt from keyboard
+      sigaddset(&sigmask, SIGQUIT); // Quit from keyboard
+      sigaddset(&sigmask, SIGABRT); // Abort signal from abort(3)
+      sigaddset(&sigmask, SIGTERM); // Termination signal
+      sigaddset(&sigmask, SIGSTOP); // Stop process
+      sigaddset(&sigmask, SIGTSTP); // Stop typed at terminal
+      if (sigprocmask(SIG_BLOCK, &sigmask, NULL) == 0) {
+        sfd.sign = signalfd(-1, &sigmask, 0);
+        if (sfd.sign != -1) {
+          sfd.epoll = epoll_create1(0);
+          if (sfd.epoll != -1) {
+            sfd.peer = client_sfd(argv[1], port);
+            if (sfd.peer != -1) {
+              event.data.fd = sfd.peer;
+              event.events = EVENT_PEER_OUT;
+              peer = peer_data_t(sfd.peer);
+              peer.file = f;
+              if (epoll_ctl(sfd.epoll, EPOLL_CTL_ADD, sfd.peer, &event) != -1) {
+                event.data.fd = sfd.sign;
+                event.events = EPOLLIN;
+                if (epoll_ctl(sfd.epoll, EPOLL_CTL_ADD, sfd.sign, &event) != -1) {
+                  while (errno == EXIT_SUCCESS && !done) {
+                    // if (send_servr_st == 1) {
+                    //   if (recv_servr(peer) != -1)
+                    //     errno = EXIT_SUCCESS;
+                    //   perror("# filesent recv_servr");
+                    // }
+                    nevs = epoll_pwait(sfd.epoll, events, GMAX_PEER_EV, GMSTIMEOUT, NULL);
+                    if (nevs != -1) {
+                      for (n = 0; n < nevs; n++) {
+                        if (events[n].data.fd == sfd.sign) {
+                          nread = read(events[n].data.fd, &siginfo, sizeof (struct signalfd_siginfo));
+                          if (nread == sizeof (struct signalfd_siginfo)) {
+                            if (siginfo.ssi_signo == SIGHUP || siginfo.ssi_signo == SIGINT
+                                || siginfo.ssi_signo == SIGQUIT || siginfo.ssi_signo == SIGABRT
+                                || siginfo.ssi_signo == SIGTERM || siginfo.ssi_signo == SIGSTOP
+                                || siginfo.ssi_signo == SIGTSTP) {
+                              printf("\nCancel request received\n");
+                              done = true; // quits while loop with !done condition
+                              break;
+                            } else fprintf(stderr, "# Received signal %u\n", siginfo.ssi_signo);
+                          } else {
+                            perror("# client main sfd.sign read"); // quits while loop with errno == EXIT_SUCCESS condition
+                            break;
+                          }
+                        }
+                        // peer socket file descriptor events
+                        if (events[n].events & EVENT_CLOSE) {
+                          // Closing the descriptor will make epoll remove it
+                          // from the set of descriptors which are monitored.
+                          printf("Connection closed\n");
+                          close_sock(events[n]);
+                          done = true;
+                          break;
+                        }
+                        if (events[n].events & EPOLLERR) {
+                          fprintf(stderr, "# EPOLLERR on socket %d. Closing it...\n", events[n].data.fd);
+                          if (getsockopt(events[n].data.fd, SOL_SOCKET, SO_ERROR, &optval, &optlen) == 0)
+                            fprintf(stderr, "# %s\n", strerror_r(optval, msg, GMSG_SIZE));
+                          else fprintf(stderr, "# Could not getsockopt error information on socket %d\n", events[n].data.fd);
+                          close_sock(events[n]);
+                          done = true;
+                          break;
+                        } else if (events[n].events & EPOLLOUT) {
+                          if (!connected) {
+                            if (getsockopt(events[n].data.fd, SOL_SOCKET, SO_ERROR, &optval, &optlen) == 0) {
+                              if (optval == 0) {
+                                connected = true;
+                                printf("Socket connected\n");
+                              } else {
+                                errno = optval;
+                                fprintf(stderr, "# Socket connection failed: %s\n", strerror_r(optval, msg, GMSG_SIZE));
+                                break;
+                              }
+                            } else {
+                              perror("# client main getsockopt");
+                              break;
+                            }
+                          } else if (!peer.done) {
+                            send_servr_st = send_servr(peer);
+                            perror("# client main send_servr");
+                            if (send_servr_st == 0) errno = EXIT_SUCCESS;
+                            else if (send_servr_st == 1) {
+                              peer.done = true;
+                              events[n].events = EVENT_PEER_IN;
+                              printf("Done sending data to server\n");
+                              if (epoll_ctl(sfd.epoll, EPOLL_CTL_MOD, events[n].data.fd, &events[n]) != -1) {
+                                printf("Successfully switched to EVENT_PEER_IN\n");
+                                errno = EXIT_SUCCESS;
+                              } else perror("# main EPOLL_CTL_MOD EVENT_PEER_IN");
+                            }
+                          } else fprintf(stderr, "# Received EPOLLOUT event when not connected or when already done?\n");
+                        } else if (events[n].events & EPOLLIN) {
+                          recv_servr_st = recv_servr(peer);
+                          perror("# client main recv_servr");
+                          if (recv_servr_st == 0) errno = EXIT_SUCCESS;
+                          else if (recv_servr_st == 1) {
+                            printf("Done receiving data to server. Closing connection...\n");
+                            close_sock(events[n]);
+                            done = true;
+                            break;
+                          }
+                        }
+                      }
+                    } else if (errno == EINTR) errno = EXIT_SUCCESS;
+                    else perror("# client main epoll_pwait");
+                  }
+                } else perror("# client main epoll_ctl ADD sfd.sign");
+              } else perror("# client main epoll_ctl ADD sfd.peer");
+            } else perror("# client main Could not initialize socket");
+          } else perror("# client main epoll_create1");
+        } else perror("# client main signalfd");
+      } else perror("# client main sigprocmask");
       fclose(f); f = NULL;
-    } else msg = (char *) "Could not open file";
+    } else perror("# Could not open file");
   } else {
-    fprintf(stderr, "Wrong arguments! The correct usage is: %s host [port] file. If no port is specified, it defaults to 1197\n", argv[0]);
+    fprintf(stderr, "# Wrong arguments! The correct usage is: %s host [port] file. If no port is specified, it defaults to 1197\n", argv[0]);
     errno = EINVAL;
   }
-  if (sfd != -1) {
-    close(sfd);
-    sfd = -1;
-  }
-  perror(msg);
+  for (n = 0; n < GMAX_SERVR_EV; n++)
+    close_sock(events[n]);
+  // already closed all other sockets on main loop or loop above
+  close_sock(sfd.epoll);
   port = NULL;
   path = NULL;
-  msg = NULL;
   exit(errno);
 }

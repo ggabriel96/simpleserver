@@ -1,4 +1,1 @@
-{
-  "name": "Chocolate",
-  "price": "3.97"
-}
+{"name": "Chocolate", "price": "3.97"}

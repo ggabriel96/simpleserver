@@ -1,4 +1,4 @@
-NT ?= 2
+NT ?= 8
 
 all: server client
 

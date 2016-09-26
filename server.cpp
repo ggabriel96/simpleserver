@@ -10,18 +10,18 @@
 using namespace std;
 
 #ifndef NT
-#define NT 2
+#define NT 8
 #endif
 
 int main(int argc, const char *argv[]) {
   sigset_t sigmask;
   union sigval sigv;
-  ssize_t nread = -1;
+  ssize_t nread = 0;
   pthread_t thread_id;
+  const char *port = NULL;
   vector<pthread_t> threads;
   struct signalfd_siginfo siginfo;
   int sigfd = -1, nt = -1, *retval = NULL;
-  const char *port = NULL, *msg = (char *) "Server execution terminated";
   errno = EXIT_SUCCESS;
   if (argc <= 2) {
     if (argc == 1) port = (char *) "1197";
@@ -58,24 +58,22 @@ int main(int argc, const char *argv[]) {
                     printf("\nCancel request queued for thread %lu...\n", th);
                     errno = pthread_join(th, (void **) &retval);
                     printf("Thread %lu terminated with status %d\n", th, *retval);
-                    perror("pthread_join");
-                  } else perror("pthread_sigqueue");
+                    perror("\n# server main pthread_join");
+                  } else perror("\n# server main pthread_sigqueue");
                 }
                 break;
-              } else fprintf(stderr, "Received signal %u\n", siginfo.ssi_signo);
-            } else msg = (char *) "main read sigfd";
+              } else fprintf(stderr, "\n# Received signal %u\n", siginfo.ssi_signo);
+            } else perror("\n# server main read sigfd");
           }
-        } else msg = (char *) "main pthread_create";
-      } else msg = (char *) "main signalfd";
-    } else msg = (char *) "main pthread_sigmask";
+        } else perror("\n# server main pthread_create");
+      } else perror("\n# server main signalfd");
+    } else perror("\n# server main pthread_sigmask");
   } else {
-    fprintf(stderr, "Wrong arguments! The correct usage is: %s [port]. If no port is specified, it defaults to 1197\n", argv[0]);
+    fprintf(stderr, "# Wrong arguments! The correct usage is: %s [port]. If no port is specified, it defaults to 1197\n", argv[0]);
     errno = EINVAL;
   }
-  close(sigfd); sigfd = -1;
+  close_sock(sigfd);
   // free(retval); // only free if thread worker function malloc()ed the return address
-  perror(msg);
-  msg = NULL;
   port = NULL;
   retval = NULL;
   exit(errno);
