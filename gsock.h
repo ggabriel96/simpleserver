@@ -1,8 +1,10 @@
+#include <map>
 #include <stdio.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/epoll.h>
+using namespace std;
 
 #define GMSG_SIZE 64
 #define GBUF_SIZE 1024
@@ -47,7 +49,7 @@ typedef struct peer_data {
   char data[GBUF_SIZE];
   products_info_t info;
   bool done_peer, done_servr;
-  size_t data_length, data_read;
+  ssize_t data_length, data_read;
   peer_data(int _fd, FILE *_file): fd(_fd), file(_file), info(), done_peer(false), done_servr(false), data_length(0), data_read(0) {
     memset(data, 0, sizeof (data));
   };
@@ -69,8 +71,8 @@ int close_sock(struct epoll_event &);
 int send_eof(struct epoll_event &);
 int send_servr(peer_data_t &);
 int recv_servr(peer_data_t &);
-int send_peer(peer_data_t &);
-int recv_peer(peer_data_t &);
+int send_peer(map<int, peer_data_t>::iterator);
+int recv_peer(map<int, peer_data_t>::iterator);
 
 void *server(void *);
 int calc_products(peer_data_t &);

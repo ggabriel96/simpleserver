@@ -114,7 +114,7 @@ bool sign(char c) {
 }
 
 int calc_products(peer_data_t &peer) {
-  size_t j, n;
+  ssize_t j, n;
   double price = 0.0;
   set<string> products;
   int state = GREAD_START;
@@ -154,6 +154,7 @@ int calc_products(peer_data_t &peer) {
       j = peer.data_read + 1;
     } else if (state == GREAD_PRICE && numeric(peer.data[peer.data_read])) {
       state = GREAD_SIGN;
+      // and '\0'
     } else if (state == GREAD_SIGN && (alphabet(peer.data[peer.data_read]) || peer.data[peer.data_read] == '\n'))  {
       price = strtod(peer.data + j, NULL);
       printf("price: %lf\n", price);
@@ -166,9 +167,8 @@ int calc_products(peer_data_t &peer) {
       break;
     }
   }
-  if (state == GREAD_ERR) {
-    return -1;
-  }
+  if (state == GREAD_ERR) return -1;
+  else peer.info.amount = products.size();
   return 0;
 }
 
@@ -205,34 +205,38 @@ int send_servr(peer_data_t &peer) {
   return status;
 }
 
-int send_peer(peer_data_t &peer) {
+int send_peer(map<int, peer_data_t>::iterator peer_it) {
   string answ;
+  int status = 0;
   ssize_t nsent = 0;
   char msg[GMSG_SIZE];
   pthread_t self = pthread_self();
-  int status = calc_products(peer);
   memset(msg, 0, sizeof (msg));
-  if (status == 0 && !peer.done_peer) {
-    answ = to_string(peer.info.amount);
-    answ.append(" products and $");
-    answ.append(to_string(peer.info.total_price));
-    answ.append(" total price");
-    peer.done_peer = true;
-    strcpy(peer.data, answ.c_str());
-    // peer.data = answ.c_str();
-    peer.data_length = answ.length();
-  } else if (peer.done_peer) {
-    printf("Thread %lu attempting to send:\n%s\nto socket %d (%ld byte%s)...\n", self, peer.data, peer.fd, peer.data_length, peer.data_length == 1 ? "" : "s");
-    nsent = send(peer.fd, peer.data, peer.data_length, 0);
+  if (!peer_it->second.done_servr) {
+    status = calc_products(peer_it->second);
+    if (status == 0) {
+      answ = to_string(peer_it->second.info.amount);
+      answ.append(" products and $");
+      answ.append(to_string(peer_it->second.info.total_price));
+      answ.append(" total price");
+      peer_it->second.done_servr = true;
+      strcpy(peer_it->second.data, answ.c_str());
+      peer_it->second.data_length = answ.length();
+    }
+  }
+  // do not add 'else' here, because block above changes peer.done_servr value!
+  if (peer_it->second.done_servr) {
+    printf("Thread %lu attempting to send:\n%s\nto socket %d (%ld byte%s)...\n", self, peer_it->second.data, peer_it->second.fd, peer_it->second.data_length, peer_it->second.data_length == 1 ? "" : "s");
+    nsent = send(peer_it->second.fd, peer_it->second.data, peer_it->second.data_length, 0);
     if (nsent > 0) {
-      printf("Thread %lu successfully returned data to socket %d\n", self, peer.fd);
-      if (nsent == (ssize_t) peer.data_length) status = 1;
+      printf("Thread %lu successfully returned data to socket %d\n", self, peer_it->second.fd);
+      if (nsent == peer_it->second.data_length) status = 1; // doesn't work
       else status = 0;
     } else if (nsent == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
       status = -1;
       fprintf(stderr, "# send on thread %lu: %s\n", self, strerror_r(errno, msg, GMSG_SIZE));
     }
-  } status = -1;
+  } else status = -1;
   return status;
 }
 
@@ -243,7 +247,6 @@ int recv_servr(peer_data_t &peer) {
   errno = EXIT_SUCCESS;
   memset(buf, 0, sizeof (buf));
   nread = recv(peer.fd, buf, GBUF_SIZE, 0);
-  printf("nread: %lu\n", nread);
   if (nread > 0) {
     if (buf[0] == '\0') status = 1;
     else if (peer.data_length + nread < GBUF_SIZE) {
@@ -260,7 +263,7 @@ int recv_servr(peer_data_t &peer) {
   return status;
 }
 
-int recv_peer(peer_data_t &peer) {
+int recv_peer(map<int, peer_data_t>::iterator peer_it) {
   int status = 0;
   ssize_t nread = 0;
   pthread_t self = pthread_self();
@@ -268,18 +271,18 @@ int recv_peer(peer_data_t &peer) {
   errno = EXIT_SUCCESS;
   memset(buf, 0, sizeof (buf));
   memset(msg, 0, sizeof (msg));
-  nread = recv(peer.fd, buf, GBUF_SIZE, 0);
+  nread = recv(peer_it->second.fd, buf, GBUF_SIZE, 0);
   if (nread > 0) {
     if (buf[0] == '\0') status = 1;
-    else if (peer.data_length + nread < GBUF_SIZE) {
-      strncpy(peer.data + peer.data_length, buf, nread);
-      peer.data_length += nread;
-      peer.data[peer.data_length] = '\0';
+    else if (peer_it->second.data_length + nread < GBUF_SIZE) {
+      strncpy(peer_it->second.data + peer_it->second.data_length, buf, nread);
+      peer_it->second.data_length += nread;
+      peer_it->second.data[peer_it->second.data_length] = '\0';
     } else {
       // disk
     }
-    printf("Thread %lu received on socket %d:\n%s (%ld byte%s)\n", self, peer.fd, buf[0] == '\0' ? "'EOF'" : buf, nread, nread == 1 ? "" : "s");
-    printf("\n\nComplete data: %s\n", peer.data);
+    printf("Thread %lu received on socket %d:\n%s (%ld byte%s)\n", self, peer_it->second.fd, buf[0] == '\0' ? "'EOF'" : buf, nread, nread == 1 ? "" : "s");
+    printf("\n\nComplete data: %s\n", peer_it->second.data);
   } else if (nread == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
     status = -1;
     fprintf(stderr, "# data recv on thread %lu: %s\n", self, strerror_r(errno, msg, GMSG_SIZE));
@@ -289,7 +292,6 @@ int recv_peer(peer_data_t &peer) {
 
 void *server(void *port) {
   fdset_t sfd;
-  peer_data_t peer;
   sigset_t sigmask;
   bool done = false;
   ssize_t nread = 0;
@@ -310,7 +312,7 @@ void *server(void *port) {
   sigaddset(&sigmask, SIGUSR1);
   errno = pthread_sigmask(SIG_BLOCK, &sigmask, NULL);
   if (!errno) {
-    sfd.sign = signalfd(-1, &sigmask, SFD_NONBLOCK | SFD_CLOEXEC);
+    sfd.sign = signalfd(-1, &sigmask, SFD_NONBLOCK);
     if (sfd.sign != -1) {
       sfd.epoll = epoll_create1(0);
       if (sfd.epoll != -1) {
@@ -375,25 +377,30 @@ void *server(void *port) {
                         } else perror("# server accept");
                         errno = EXIT_SUCCESS;
                       } else if (events[n].events & EPOLLIN) {
-                        peer = dataset[events[n].data.fd];
-                        if (recv_peer(peer) == 1) {
-                          printf("Thread %lu is done receiving data from socket %d....\n", self, events[n].data.fd);
-                          events[n].events = EVENT_PEER_OUT;
-                          if (epoll_ctl(sfd.epoll, EPOLL_CTL_MOD, events[n].data.fd, &events[n]) != -1) {
-                            printf("Thread %lu successfully switched socket %d to EVENT_PEER_OUT\n", self, events[n].data.fd);
-                          } else {
-                            perror("# server EPOLL_CTL_MOD EVENT_PEER_OUT");
-                            close_sock(events[n]);
-                          }
-                        } else perror("# server recv_peer");
+                        auto peer = dataset.find(events[n].data.fd);
+                        if (peer != dataset.end()) {
+                          if (recv_peer(peer) == 1) {
+                            printf("Thread %lu is done receiving data from socket %d....\n", self, events[n].data.fd);
+                            events[n].events = EVENT_PEER_OUT;
+                            if (epoll_ctl(sfd.epoll, EPOLL_CTL_MOD, events[n].data.fd, &events[n]) != -1) {
+                              printf("Thread %lu successfully switched socket %d to EVENT_PEER_OUT\n", self, events[n].data.fd);
+                            } else {
+                              perror("# server EPOLL_CTL_MOD EVENT_PEER_OUT");
+                              close_sock(events[n]);
+                            }
+                          } else perror("# server recv_peer");
+                        } else {
+                          fprintf(stderr, "# Thread %lu could not find socket %d on dataset. Closing it...\n", self, event.data.fd);
+                          close_sock(events[n]);
+                        }
                         errno = EXIT_SUCCESS;
                       } else if (events[n].events & EPOLLOUT) {
                         auto peer = dataset.find(events[n].data.fd);
                         if (peer != dataset.end()) {
-                          if (!peer->second.done_servr) {
-                            if (send_peer(peer->second) == 1) {
-                              peer->second.done_servr = true;
-                              printf("Thread %lu is done sending data to socket %d. Sending 'EOF'...\n", self, events[n].data.fd);
+                          if (!peer->second.done_peer) {
+                            if (send_peer(peer) == 1) {
+                              peer->second.done_peer = true;
+                              printf("Thread %lu is done sending data to peer on socket %d. Sending 'EOF'...\n", self, events[n].data.fd);
                             } else perror("# server send_peer");
                           } else if (send_eof(events[n]) != 0) perror("# server send_eof");
                         } else {

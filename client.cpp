@@ -118,13 +118,16 @@ int main(int argc, const char *argv[]) {
                             else if (send_servr_st == 1) {
                               peer.done_peer = true;
                               printf("Done sending data to server. Sending 'EOF'...\n");
-                              // events[n].events = EVENT_PEER_IN;
-                              // if (epoll_ctl(sfd.epoll, EPOLL_CTL_MOD, events[n].data.fd, &events[n]) != -1) {
-                                // printf("Successfully switched to EVENT_PEER_IN\n");
-                                // errno = EXIT_SUCCESS;
-                              // } else perror("# main EPOLL_CTL_MOD EVENT_PEER_IN");
                             }
-                          } else if (send_eof(events[n]) != 0) perror("# client main send_eof");
+                          } else if (send_eof(events[n]) == 0) {
+                            events[n].events = EVENT_PEER_IN;
+                            if (epoll_ctl(sfd.epoll, EPOLL_CTL_MOD, events[n].data.fd, &events[n]) != -1) {
+                              printf("Successfully switched socket %d to EVENT_PEER_IN\n", events[n].data.fd);
+                            } else {
+                              perror("# client main EPOLL_CTL_MOD EVENT_PEER_IN");
+                              close_sock(events[n]);
+                            }
+                          } else perror("# client main send_eof");
                         } else if (events[n].events & EPOLLIN) {
                           recv_servr_st = recv_servr(peer);
                           perror("# client main recv_servr");
