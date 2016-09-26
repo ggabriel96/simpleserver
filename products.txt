@@ -1,1 +1,5 @@
-{"name": "Chocolate", "price": "3.97"}
+Chocolate, 3.97
+Cheese, 5.75
+Chocolate, 3.97
+Coffee, 4.11
+Chocolate, 3.97

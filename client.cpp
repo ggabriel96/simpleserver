@@ -60,11 +60,6 @@ int main(int argc, const char *argv[]) {
                 event.events = EPOLLIN;
                 if (epoll_ctl(sfd.epoll, EPOLL_CTL_ADD, sfd.sign, &event) != -1) {
                   while (errno == EXIT_SUCCESS && !done) {
-                    // if (send_servr_st == 1) {
-                    //   if (recv_servr(peer) != -1)
-                    //     errno = EXIT_SUCCESS;
-                    //   perror("# filesent recv_servr");
-                    // }
                     nevs = epoll_pwait(sfd.epoll, events, GMAX_PEER_EV, GMSTIMEOUT, NULL);
                     if (nevs != -1) {
                       for (n = 0; n < nevs; n++) {
@@ -96,7 +91,7 @@ int main(int argc, const char *argv[]) {
                         if (events[n].events & EPOLLERR) {
                           fprintf(stderr, "# EPOLLERR on socket %d. Closing it...\n", events[n].data.fd);
                           if (getsockopt(events[n].data.fd, SOL_SOCKET, SO_ERROR, &optval, &optlen) == 0)
-                            fprintf(stderr, "# %s\n", strerror_r(optval, msg, GMSG_SIZE));
+                            fprintf(stderr, "# EPOLLERR info: %s\n", strerror_r(optval, msg, GMSG_SIZE));
                           else fprintf(stderr, "# Could not getsockopt error information on socket %d\n", events[n].data.fd);
                           close_sock(events[n]);
                           done = true;
@@ -116,26 +111,26 @@ int main(int argc, const char *argv[]) {
                               perror("# client main getsockopt");
                               break;
                             }
-                          } else if (!peer.done) {
+                          } else if (!peer.done_peer) {
                             send_servr_st = send_servr(peer);
                             perror("# client main send_servr");
                             if (send_servr_st == 0) errno = EXIT_SUCCESS;
                             else if (send_servr_st == 1) {
-                              peer.done = true;
-                              events[n].events = EVENT_PEER_IN;
-                              printf("Done sending data to server\n");
-                              if (epoll_ctl(sfd.epoll, EPOLL_CTL_MOD, events[n].data.fd, &events[n]) != -1) {
-                                printf("Successfully switched to EVENT_PEER_IN\n");
-                                errno = EXIT_SUCCESS;
-                              } else perror("# main EPOLL_CTL_MOD EVENT_PEER_IN");
+                              peer.done_peer = true;
+                              printf("Done sending data to server. Sending 'EOF'...\n");
+                              // events[n].events = EVENT_PEER_IN;
+                              // if (epoll_ctl(sfd.epoll, EPOLL_CTL_MOD, events[n].data.fd, &events[n]) != -1) {
+                                // printf("Successfully switched to EVENT_PEER_IN\n");
+                                // errno = EXIT_SUCCESS;
+                              // } else perror("# main EPOLL_CTL_MOD EVENT_PEER_IN");
                             }
-                          } else fprintf(stderr, "# Received EPOLLOUT event when not connected or when already done?\n");
+                          } else if (send_eof(events[n]) != 0) perror("# client main send_eof");
                         } else if (events[n].events & EPOLLIN) {
                           recv_servr_st = recv_servr(peer);
                           perror("# client main recv_servr");
                           if (recv_servr_st == 0) errno = EXIT_SUCCESS;
                           else if (recv_servr_st == 1) {
-                            printf("Done receiving data to server. Closing connection...\n");
+                            printf("Done receiving data from server. Closing connection...\n");
                             close_sock(events[n]);
                             done = true;
                             break;

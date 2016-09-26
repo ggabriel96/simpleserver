@@ -9,8 +9,16 @@
 #define GMSTIMEOUT 500
 #define GMAX_PEER_EV 8
 #define GMAX_SERVR_EV 64
-#define FOREVER for (;;)
+#define GMAX_PROD_NAME 64
 #define GFGETS_BUF GBUF_SIZE - 1
+
+#define FOREVER for (;;)
+#define GREAD_START 0
+#define GREAD_NAME 1
+#define GREAD_COMMA 2
+#define GREAD_SIGN 3
+#define GREAD_PRICE 3
+#define GREAD_ERR 4
 
 const int EVENT_CLOSE = EPOLLRDHUP | EPOLLHUP;
 const int EVENT_PEER_OUT = EPOLLOUT | EVENT_CLOSE | EPOLLERR;
@@ -26,13 +34,21 @@ typedef struct fdset {
     sign(_sign), servr(_servr), epoll(_epoll), peer(_peer) {};
 } fdset_t;
 
+typedef struct products_info {
+  int amount;
+  double total_price;
+  products_info(int _amount, double _total_price): amount(_amount), total_price(_total_price) {};
+  products_info(): products_info(0, 0.0) {};
+} products_info_t;
+
 typedef struct peer_data {
   int fd;
-  bool done;
   FILE *file;
-  size_t data_length;
   char data[GBUF_SIZE];
-  peer_data(int _fd, FILE *_file): fd(_fd), done(false), file(_file), data_length(0) {
+  products_info_t info;
+  bool done_peer, done_servr;
+  size_t data_length, data_read;
+  peer_data(int _fd, FILE *_file): fd(_fd), file(_file), info(), done_peer(false), done_servr(false), data_length(0), data_read(0) {
     memset(data, 0, sizeof (data));
   };
   peer_data(int _fd): peer_data(_fd, NULL) {};
@@ -40,6 +56,9 @@ typedef struct peer_data {
 } peer_data_t;
 
 off_t fsize(FILE *);
+bool alphabet(char);
+bool numeric(char);
+bool sign(char);
 
 void init_hints(struct addrinfo *);
 int init_sfd(const char *, const char *, bool);
@@ -54,3 +73,4 @@ int send_peer(peer_data_t &);
 int recv_peer(peer_data_t &);
 
 void *server(void *);
+int calc_products(peer_data_t &);
